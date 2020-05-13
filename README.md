@@ -1,3 +1,9 @@
+<!-- This Source Code Form is subject to the terms of the Mozilla Public
+   - License, v. 2.0. If a copy of the MPL was not distributed with this
+   - file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+
+Warning: As of 2020-05-13, this project is still is work in progress and is not yet even minimally viable. The current state is that the basic ZMTP implementation is a more-or-less finished first draft, but is completely untested. Thoroughly testing the ZMTP implementation is the next step. The step after that is to add the basic REQ/REP socket types and then thoroughly test them. After that, the project will be considered "minimally viable", and still a work in progress.
+
 # OxZMQ (`oxzmq`)
 
 OxZMQ is an implementation of [ZeroMQ][zmq] in pure Rust. Its high-level goals are as follows, ordered by priority.
