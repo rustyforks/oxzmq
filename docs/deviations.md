@@ -11,6 +11,9 @@ OxZMQ will inevitably deviate from what people expect from a ZeroMQ implementati
 
 ## ZMTP
 
+### Only 3.* protocol versions are supported.
+Backward compatibility with `1.*` and `2.*` ZMTP versions is a priority, but not a high one. It's probably more important to work on implementing different socket types and security mechanisms.
+
 ### The `socket-type` field must be specified.
 The `oxzmq-zmtp` library requires that clients specify the `socket-type` property in the NULL handshake. The authors didn't know how to work around this, so this is the current behavior. The specification says that implementations "SHOULD" specify the property, but does not require that they do so. If anyone knows the correct way to deal with a missing `socket-type` property, please file an issue and we will fix it.
 
