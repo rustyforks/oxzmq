@@ -7,14 +7,15 @@ use crate::{
     handshake::{Handshake, HandshakeError},
     socket::{SocketType, SocketTypeFromBytesError},
 };
-use futures::io::{self, AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite};
+use futures::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use std::{convert::TryFrom, marker::Unpin};
 
 mod frame;
 mod handshake;
+mod parse;
 mod socket;
 
-const PADDING_LEN: usize = 80;
+const PADDING_LEN: usize = 8;
 const FILLER_LEN: usize = 31;
 
 #[derive(Debug, Clone)]
@@ -26,27 +27,40 @@ pub struct ZmtpSocket<S> {
 #[derive(Debug, Clone)]
 pub struct Connection<S> {
     remote_version: Version,
+    handshake: Handshake,
     remote_socket_type: SocketType,
     multipart_buffer: Vec<MessageFrame>,
     stream: S,
 }
 
-impl<S: AsyncBufRead + AsyncRead + AsyncWrite + Unpin> Connection<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     pub async fn new(
         mut stream: S,
-        socket_type: &SocketType,
+        mechanism: Mechanism,
+        socket_type: SocketType,
     ) -> Result<Connection<S>, ConnectionError> {
+        // Send a greeting to the remote peer.
+        Greeting::write_to(mechanism, &mut stream).await?;
+
+        // Receive a greeting and check for validity.
         let greeting = Greeting::read_new(&mut stream).await?;
         let remote_version = greeting.version;
 
-        // TODO: Send error here if remote_version isn't supported.
+        if !remote_version.supported() {
+            let err_cmd = Frame::new_fatal_error("ZMTP version not supported");
+            err_cmd.write_to(&mut stream).await?;
+            return Err(ConnectionError::RemoteVersionNotSupported(remote_version));
+        }
 
+        // Perform a handshake to determine how the peers will talk going forward
+        // and what secrets to store for the peer, if any (e.g. cryptographic keys).
         let handshake = Handshake::perform(&mut stream, &greeting, &socket_type).await?;
 
-        let remote_socket_type_bytes = match handshake {
-            Handshake::Null(null_handshake) => {
-                null_handshake.properties.get(String::from("socket-type")).map(|slice| slice.to_vec())
-            }
+        let remote_socket_type_bytes = match &handshake {
+            Handshake::Null(null_handshake) => null_handshake
+                .properties
+                .get(String::from("socket-type"))
+                .map(|slice| slice.to_vec()),
         };
         let remote_socket_type_bytes =
             remote_socket_type_bytes.ok_or(ConnectionError::MissingRemoteSocketType)?;
@@ -57,13 +71,14 @@ impl<S: AsyncBufRead + AsyncRead + AsyncWrite + Unpin> Connection<S> {
             let err_cmd = Frame::new_fatal_error("invalid socket combination");
             err_cmd.write_to(&mut stream).await?;
             return Err(ConnectionError::InvalidSocketCombination(
-                *socket_type,
+                socket_type,
                 remote_socket_type,
             ));
         }
 
         Ok(Self {
             remote_version,
+            handshake,
             remote_socket_type,
             multipart_buffer: Vec::new(),
             stream,
@@ -71,7 +86,18 @@ impl<S: AsyncBufRead + AsyncRead + AsyncWrite + Unpin> Connection<S> {
     }
 
     pub async fn recv_frame(&mut self) -> Result<Frame, RecvFrameError> {
-        Ok(Frame::read_new(&mut self.stream).await?)
+        match self.handshake {
+            Handshake::Null(_) => Ok(Frame::read_new(&mut self.stream).await?),
+        }
+    }
+
+    pub async fn send_frame(&mut self, frame: &Frame) -> Result<(), io::Error> {
+        match self.handshake {
+            Handshake::Null(_) => {
+                frame.write_to(&mut self.stream).await?;
+                Ok(())
+            }
+        }
     }
 }
 
@@ -94,6 +120,9 @@ pub enum ConnectionError {
 
     #[error("remote peer must provide socket type")]
     MissingRemoteSocketType,
+
+    #[error("remote version ({}.{}) not supported", .0.major, .0.minor)]
+    RemoteVersionNotSupported(Version),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -117,17 +146,17 @@ impl Greeting {
     where
         R: AsyncRead + Unpin,
     {
-        // Read signature
-        let mut sig_first_byte_buf = [0_u8; 1];
-        let mut sig_padding_buf = [0_u8; PADDING_LEN];
-        let mut sig_last_byte_buf = [0_u8; 1];
+        // Read whole greeting as a chunk of bytes, then parse it.
+        let mut greeting_bytes = Vec::with_capacity(64);
+        stream.read_exact(&mut greeting_bytes).await?;
+        drop(stream); // make sure we don't read from it again
 
-        stream.read_exact(&mut sig_first_byte_buf).await?;
-        stream.read_exact(&mut sig_padding_buf).await?;
-        stream.read_exact(&mut sig_last_byte_buf).await?;
+        let rest = greeting_bytes.as_slice();
 
-        let sig_first_byte = u8::from_be_bytes(sig_first_byte_buf);
-        let sig_last_byte = u8::from_be_bytes(sig_last_byte_buf);
+        // Read signature bytes separated by padding.
+        let (sig_first_byte, rest) = parse::parse_u8(rest);
+        let rest = &rest[PADDING_LEN..]; // discard padding
+        let (sig_last_byte, rest) = parse::parse_u8(rest);
 
         if sig_first_byte != 0xFF {
             return Err(GreetingError::Signature);
@@ -138,20 +167,17 @@ impl Greeting {
         }
 
         // Read version
-        let mut version_major_buf = [0_u8; 1];
-        let mut version_minor_buf = [0_u8; 1];
-
-        stream.read_exact(&mut version_major_buf).await?;
-        stream.read_exact(&mut version_minor_buf).await?;
+        let (version_major, rest) = parse::parse_u8(rest);
+        let (version_minor, rest) = parse::parse_u8(rest);
 
         let version = Version {
-            major: u8::from_be_bytes(version_major_buf),
-            minor: u8::from_be_bytes(version_minor_buf),
+            major: version_major,
+            minor: version_minor,
         };
 
         // Read mechanism
-        let mut mechanism_buf = [0_u8; 20];
-        stream.read_exact(&mut mechanism_buf).await?;
+        let mechanism_buf = &rest[..20];
+        let rest = &rest[20..];
         let null_idx = mechanism_buf
             .iter()
             .position(|&x| x == 0x00)
@@ -168,23 +194,47 @@ impl Greeting {
         };
 
         // Read as-server
-        let mut as_server_buf = [0_u8; 1];
-        stream.read_exact(&mut as_server_buf).await?;
-        let as_server = match as_server_buf {
-            [0x00] => AsServer::Client,
-            [0x01] => AsServer::Server,
-            [x] => return Err(GreetingError::AsServer(x)),
+        let (as_server_byte, _) = parse::parse_u8(rest);
+        let as_server = match as_server_byte {
+            0x00 => AsServer::Client,
+            0x01 => AsServer::Server,
+            x => return Err(GreetingError::AsServer(x)),
         };
-
-        // Read filler
-        let mut filler_buf = [0_u8; FILLER_LEN];
-        stream.read_exact(&mut filler_buf).await?;
 
         Ok(Self {
             version,
             mechanism,
             as_server,
         })
+    }
+
+    pub async fn write_to<W>(mechanism: Mechanism, stream: &mut W) -> Result<(), io::Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mut greeting_buffer = Vec::<u8>::with_capacity(64);
+
+        // Write signature.
+        greeting_buffer.push(0xFF);
+        greeting_buffer.extend(std::iter::repeat(0x00).take(PADDING_LEN));
+        greeting_buffer.push(0x7F);
+
+        // Write version.
+        greeting_buffer.extend_from_slice(&[0x03, 0x00]);
+
+        // Write mechanism.
+        mechanism.write_to(&mut greeting_buffer).await?;
+
+        // Write as-server.
+        match mechanism {
+            Mechanism::Null => greeting_buffer.push(0),
+        }
+
+        // Write filler.
+        greeting_buffer.extend(std::iter::repeat(0x00).take(FILLER_LEN));
+
+        stream.write_all(&greeting_buffer).await?;
+        Ok(())
     }
 }
 
@@ -212,7 +262,6 @@ pub enum GreetingError {
     AsServer(u8),
 }
 
-
 /// `Version` can be returned as part of an error in `GreetingError`. It
 /// might be helpful for downstream crates to use this information.
 #[derive(Debug, Clone, Copy)]
@@ -221,9 +270,31 @@ pub struct Version {
     minor: u8,
 }
 
+impl Version {
+    pub fn supported(&self) -> bool {
+        self.major >= 3
+    }
+}
+
 #[derive(Debug, Clone)]
-enum Mechanism {
+pub enum Mechanism {
     Null,
+}
+
+impl Mechanism {
+    pub async fn write_to<W>(&self, stream: &mut W) -> Result<(), io::Error>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        let mechanism_str = match self {
+            Mechanism::Null => "NULL",
+        };
+
+        stream.write_all(mechanism_str.as_bytes()).await?;
+        stream.write_all(&[0; 20][mechanism_str.len()..]).await?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -234,8 +305,18 @@ enum AsServer {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use smol::Async;
+
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn connect_null() {
+        let (local, remote) = tcp_test::channel();
+        let local = Async::new(local);
+        let remote = Async::new(remote);
+
+        let local_conn = Connection::new(local, Mechanism::Null, SocketType::Req);
+        let remote_conn = Connection::new(remote, Mechanism::Null, SocketType::Req);
+
+        smol::run(async move {})
     }
 }

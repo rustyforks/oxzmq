@@ -7,7 +7,7 @@ use crate::{
     handshake::{Properties, PropertiesParseError},
     socket::SocketType,
 };
-use futures::io::{self, AsyncBufRead, AsyncRead, AsyncWrite};
+use futures::io::{self, AsyncRead, AsyncWrite};
 
 // More info: https://rfc.zeromq.org/spec/23/#the-null-security-mechanism#
 #[derive(Debug, Clone)]
@@ -21,7 +21,7 @@ impl NullHandshake {
         socket_type: &SocketType,
     ) -> Result<NullHandshake, NullHandshakeError>
     where
-        S: AsyncWrite + AsyncRead + AsyncBufRead + Unpin,
+        S: AsyncWrite + AsyncRead + Unpin,
     {
         // As written in spec, send READY command first.
         let mut ready_cmd_data = Vec::new();

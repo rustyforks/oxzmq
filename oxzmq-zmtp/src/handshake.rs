@@ -7,7 +7,7 @@ use crate::{
     socket::SocketType,
     Greeting, Mechanism,
 };
-use futures::io::{self, AsyncBufRead, AsyncRead, AsyncWrite};
+use futures::io::{self, AsyncRead, AsyncWrite};
 use std::{collections::HashMap, convert::TryFrom};
 
 mod null;
@@ -24,7 +24,7 @@ impl Handshake {
         socket_type: &SocketType,
     ) -> Result<Handshake, HandshakeError>
     where
-        S: AsyncWrite + AsyncRead + AsyncBufRead + Unpin,
+        S: AsyncWrite + AsyncRead + Unpin,
     {
         match greeting.mechanism {
             Mechanism::Null => Ok(Handshake::Null(

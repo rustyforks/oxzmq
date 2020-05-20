@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use futures::io::{self, AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite};
+use futures::io::{self, AsyncRead, AsyncReadExt, AsyncWrite};
 use std::convert::TryFrom;
 
 const MORE_FLAG_IDX: u8 = 0;
@@ -80,7 +80,7 @@ impl Frame {
         })
     }
 
-    pub(crate) async fn read_new<R: AsyncBufRead + Unpin>(
+    pub(crate) async fn read_new<R: AsyncRead + Unpin>(
         stream: &mut R,
     ) -> Result<Frame, FrameParseError> {
         let mut flags_buf = [0_u8; 1];
@@ -123,10 +123,15 @@ impl Frame {
 
                 // Read the command name.
                 let mut command_name_bytes = Vec::<u8>::with_capacity(10);
-                stream.read_until(0x00, &mut command_name_bytes).await?;
-
-                // Get rid of the null delimiter.
-                command_name_bytes.pop();
+                let mut command_name_next_byte = [0];
+                loop {
+                    stream.read_exact(&mut command_name_next_byte).await?;
+                    if command_name_next_byte == [0x00] {
+                        break;
+                    } else {
+                        command_name_bytes.push(command_name_next_byte[0]);
+                    }
+                }
                 let command_name = String::from_utf8(command_name_bytes)?;
 
                 let mut command_data = Vec::new();
@@ -183,7 +188,6 @@ impl Frame {
             SHORT_SIZE_LEN
         };
         let length_bytes = &self.data().len().to_be_bytes()[..length_bytes_len];
-
 
         // Create a buffer to hold some small intermediate writes. We probably need no
         // more than 20 bytes because flags=1, length<=8, and name is usually <= 5.
@@ -250,13 +254,14 @@ pub(crate) enum FrameKind {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     #[test]
     fn test_get_bit() {
         let u = 0b_1001_0001;
-        assert_eq!(get_bit(n, 0), true);
-        assert_eq!(get_bit(n, 1), false);
-        assert_eq!(get_bit(n, 4), true);
-        assert_eq!(get_bit(n, 7), true);
-        assert_eq!(get_bit(n, 8), false);
+        assert_eq!(get_bit(u, 0), true);
+        assert_eq!(get_bit(u, 1), false);
+        assert_eq!(get_bit(u, 4), true);
+        assert_eq!(get_bit(u, 7), true);
+        assert_eq!(get_bit(u, 8), false);
     }
 }

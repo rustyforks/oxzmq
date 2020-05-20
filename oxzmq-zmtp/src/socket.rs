@@ -64,7 +64,9 @@ impl TryFrom<&[u8]> for SocketType {
         };
 
         if !SUPPORTED_SOCKET_TYPES.contains(&socket_type) {
-            return Err(SocketTypeFromBytesError::Unsupported(socket_name.to_string()));
+            return Err(SocketTypeFromBytesError::Unsupported(
+                socket_name.to_string(),
+            ));
         }
 
         Ok(socket_type)
